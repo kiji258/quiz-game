@@ -227,26 +227,60 @@ function advanceMutualTurn(answeredTeamId) {
 
 function handleMutualAnswer(playerId, playerName, selectedIndex) {
     const mutual = gameState.mutual;
-    if (!mutual.roundActive || mutual.answeringPlayerId !== playerId || Date.now() > mutual.answerEndTime) return false;
+    // 如果不在答题状态，或者不是当前答题队伍，拒绝但返回 false（前端不会收到错误横幅，但状态会保留，主持人可跳过）
+    if (!mutual.roundActive || mutual.answeringPlayerId !== playerId) {
+        return false;
+    }
+
+    // 无论是否超时，都处理此答案（超时视为错误答案，不得分）
+    const isTimeout = Date.now() > mutual.answerEndTime;
     clearMutualTimer();
-    const isCorrect = (selectedIndex === mutual.currentQuestion.answer);
+
+    const isCorrect = isTimeout ? false : (selectedIndex === mutual.currentQuestion.answer);
     const player = gameState.players.find(p => p.id === playerId);
     let scoreDelta = 0;
     if (isCorrect) { scoreDelta = gameState.correctPoints; player.score += scoreDelta; }
-    addHistoryRecord('mutual', playerId, player.name, playerName, mutual.currentQuestion, mutual.currentQuestion.options[selectedIndex], isCorrect, scoreDelta);
+
+    // 记录历史
+    if (isTimeout) {
+        addHistoryRecord('mutual', playerId, player.name, playerName || '?', mutual.currentQuestion, '超时未答', false, 0);
+    } else {
+        addHistoryRecord('mutual', playerId, player.name, playerName, mutual.currentQuestion,
+            mutual.currentQuestion.options[selectedIndex], isCorrect, scoreDelta);
+    }
+
     mutual.teamAnswerCount[playerId]++;
     mutual.roundActive = false;
     mutual.currentQuestion = null;
+
+    // 生成结果消息
+    const message = isTimeout
+        ? `⏰ ${player.name} 答题超时，不得分`
+        : (isCorrect
+            ? `✅ ${player.name} 正确！+${scoreDelta}分`
+            : `❌ ${player.name} 回答错误！正确答案是 ${mutual.currentQuestion.options[mutual.currentQuestion.answer]}`);
+
     gameState.lastAnswerResult = {
-        teamId: playerId, teamName: player.name, playerName,
+        teamId: playerId,
+        teamName: player.name,
+        playerName: playerName || '未知',
         isCorrect,
-        message: isCorrect ? `✅ ${player.name} 正确！+${scoreDelta}分` : `❌ ${player.name} 错误！正确答案是 ${mutual.currentQuestion.options[mutual.currentQuestion.answer]}`,
+        message,
         timestamp: Date.now(),
     };
+
     advanceMutualTurn(playerId);
     broadcastState();
-    setTimeout(() => { if (gameState.lastAnswerResult?.teamId === playerId) gameState.lastAnswerResult = null; broadcastState(); }, 4000);
-    return { correct: isCorrect, msg: gameState.lastAnswerResult.message };
+
+    // 4秒后清除结果横幅
+    setTimeout(() => {
+        if (gameState.lastAnswerResult?.teamId === playerId) {
+            gameState.lastAnswerResult = null;
+            broadcastState();
+        }
+    }, 4000);
+
+    return { correct: isCorrect, msg: message };
 }
 
 // HTTP API (unchanged but included for completeness)

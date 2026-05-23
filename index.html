@@ -61,6 +61,22 @@
     let rushCountdown = 0, mutualCountdown = 0, countdownInterval = null, answerLocked = false;
     const wsUrl = `${location.protocol==='https:'?'wss:':'ws:'}//${location.host}`;
 
+    // 本地横幅管理（避免客户端时间差）
+    let activeBanner = null;    // { message, type }
+    let bannerTimer = null;
+
+    function setBanner(message, type) {
+        // 清除之前的定时器和横幅
+        if (bannerTimer) clearTimeout(bannerTimer);
+        activeBanner = { message, type };
+        bannerTimer = setTimeout(() => {
+            activeBanner = null;
+            bannerTimer = null;
+            // 横幅消失后重新渲染一次以移除横幅
+            if (gameState) renderFullPage();
+        }, 4000);
+    }
+
     function formatTime(sec) { const m=Math.floor(sec/60), s=sec%60; return `${m}:${s.toString().padStart(2,'0')}`; }
     function showToast(msg) { const t=document.createElement('div'); t.className='toast'; t.innerText=msg; document.body.appendChild(t); setTimeout(()=>t.remove(),3500); }
     function sendMessage(msg) { if(ws&&ws.readyState===WebSocket.OPEN) ws.send(JSON.stringify(msg)); }
@@ -89,6 +105,26 @@
                 gameState = data.state;
                 answerLocked = false;
                 if(data.state.rushRemainingSec !== undefined) { rushCountdown = data.state.rushRemainingSec; mutualCountdown = data.state.mutualRemainingSec||0; }
+
+                // 检查新的答题结果并设置本地横幅
+                if (data.state.lastAnswerResult && data.state.lastAnswerResult.message) {
+                    const res = data.state.lastAnswerResult;
+                    const type = res.isCorrect ? 'correct' : 'wrong';
+                    // 只有当结果与当前显示的横幅不同时才更新
+                    if (!activeBanner || activeBanner.message !== res.message) {
+                        setBanner(res.message, type);
+                    }
+                } else if (data.state.lastBuzzWinner && data.state.lastBuzzWinner.timestamp + 4000 > Date.now()) {
+                    if (!activeBanner || activeBanner.message !== `🏆 ${data.state.lastBuzzWinner.teamName} 抢答成功`) {
+                        setBanner(`🏆 ${data.state.lastBuzzWinner.teamName} 抢答成功`, 'buzz');
+                    }
+                } else {
+                    // 如果没有答题结果也没有抢答成功，且没有本地横幅，则清除横幅
+                    if (!activeBanner) {
+                        // 不做操作
+                    }
+                }
+
                 renderFullPage(); startCountdownDisplay();
             } else if(data.type==='ANSWER_RESULT') { showToast(data.result.msg); answerLocked = false; }
         };
@@ -156,12 +192,9 @@
         const act = gameState.currentActivity, rush = gameState.rush, mutual = gameState.mutual;
         let bannerHtml = '';
         if(gameState.activityEnded) bannerHtml = `<div class="result-banner end">🎉 本次活动到此结束，感谢大家参与！</div>`;
-        else {
-            if(gameState.lastBuzzWinner?.timestamp+4000 > Date.now()) bannerHtml += `<div class="result-banner buzz">🏆 ${gameState.lastBuzzWinner.teamName} 抢答成功</div>`;
-            if(gameState.lastAnswerResult?.timestamp && gameState.lastAnswerResult.timestamp+4000 > Date.now()) {
-                const cls = gameState.lastAnswerResult.isCorrect ? 'correct' : 'wrong';
-                bannerHtml += `<div class="result-banner ${cls}">${gameState.lastAnswerResult.message}</div>`;
-            }
+        else if (activeBanner) {
+            const cls = activeBanner.type === 'correct' ? 'correct' : (activeBanner.type === 'wrong' ? 'wrong' : 'buzz');
+            bannerHtml = `<div class="result-banner ${cls}">${activeBanner.message}</div>`;
         }
         let content = `<div class="panel"><div class="flex-row"><h2>🎙️ 主持人</h2><button class="btn btn-outline btn-sm" id="logoutBtn">退出</button></div>
             <div class="flex-row" style="margin:16px 0;">
@@ -229,11 +262,11 @@
                 if(mutual.currentDrawTeamId===player.id) special += `<button class="btn btn-primary" id="drawBtn">📖 抽题</button>`;
             }
         }
+        // 使用本地横幅
         let bannerHtml = '';
-        if(gameState.lastBuzzWinner?.timestamp+4000 > Date.now()) bannerHtml += `<div class="result-banner buzz">🏆 ${gameState.lastBuzzWinner.teamName} 抢答成功</div>`;
-        if(gameState.lastAnswerResult?.timestamp && gameState.lastAnswerResult.timestamp+4000 > Date.now()) {
-            const cls = gameState.lastAnswerResult.isCorrect ? 'correct' : 'wrong';
-            bannerHtml += `<div class="result-banner ${cls}">${gameState.lastAnswerResult.message}</div>`;
+        if (activeBanner) {
+            const cls = activeBanner.type === 'correct' ? 'correct' : (activeBanner.type === 'wrong' ? 'wrong' : 'buzz');
+            bannerHtml = `<div class="result-banner ${cls}">${activeBanner.message}</div>`;
         }
         const html = `<div class="panel"><div class="flex-row"><h2>${player.emoji} ${player.name} (${currentPlayer.playerName})</h2><button class="btn btn-outline btn-sm" id="logoutBtn">退出</button></div>
             <div class="phase-tip">${act==='rush'?'⚡抢答':'🤝互问互答'}</div>
@@ -249,7 +282,11 @@
                 opt.onclick = function() {
                     if(answerLocked) return;
                     answerLocked = true;
+                    // 立即停止本地计时器
+                    if(countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
+                    // 禁用所有选项
                     optsDiv.querySelectorAll('.option').forEach(o => o.classList.add('disabled'));
+                    // 发送答案
                     sendMessage({type:'PLAYER_ANSWER', playerId:player.id, playerName:currentPlayer.playerName, answerIndex:parseInt(this.dataset.opt)});
                 };
             });
@@ -259,7 +296,7 @@
         document.getElementById('logoutBtn').onclick = () => { currentPlayer=null; playerLoginRendered=false; window.location.href='?role=player'; };
     }
 
-    // 管理员
+    // 管理员界面（包含导入导出）
     let adminTab = 'scores';
     async function renderAdmin() {
         document.getElementById('app').innerHTML = `<div class="panel"><h2>📊 管理员</h2>
